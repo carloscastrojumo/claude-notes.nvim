@@ -57,19 +57,19 @@ If Claude changed a file you have open, reload it with `:e` (or `:checktime`).
 | `<leader>ap` | `:ClaudeNotePrev` | Jump to the previous reply |
 | `<leader>as` | `:ClaudeNoteShow` | Show the note on this line and its reply |
 | `<leader>ae` | `:ClaudeNoteEdit` | Edit the note on this line, while it is still open |
-| `<leader>ad` | `:ClaudeNoteDelete` | Delete the note on this line, unless Claude is working on it |
-| `<leader>al` | `:ClaudeNotes` | All notes of the repository in the quickfix list (the current buffer's repository, else the working directory's) |
+| `<leader>ad` | `:ClaudeNoteDelete` | Delete the note on this line; open, queued and done notes can go, a note Claude is working on cannot |
+| `<leader>al` | `:ClaudeNotes` | All notes in the quickfix list, for the current buffer's repository or else the working directory's |
 | `<leader>ac` | `:ClaudeNotesClear` | Remove the done notes |
 
 In the note editor: `<C-s>` saves (insert or normal mode), `q` or `<Esc>` cancels and asks first if you wrote something.
 
-Saving a buffer moves its open and queued notes to where the code now is, so notes follow your edits. Notes Claude has taken stay where they were. If you delete every line a note covers, the note stays at its old line and you get a warning, instead of sliding onto the code next to it.
+Notes follow your edits: while a buffer has unsaved changes its signs stay on the code they were placed on, and saving records the new lines for open and queued notes. Notes Claude has taken stay where they were. If you delete every line a note covers, the note stays at its old line and you get a warning, instead of sliding onto the code next to it.
 
 If a note is sent while you are editing it, saving the edit leaves the note alone and puts your text in the `"` register.
 
 ## Status line
 
-`require("claude-notes").status()` returns a spinner and counts while notes are queued or with Claude (`⠹ Claude: 2 in progress · 1 queued`), and an empty string otherwise. If the notes file has not changed for `stale_after` seconds while notes are pending (no Claude session watching, or it stopped), the spinner stops and the text says so (`Claude: 1 queued · no update for 12m`). For lualine:
+`require("claude-notes").status()` returns a spinner and counts for the current buffer's repository while notes are queued or with Claude (`⠹ Claude: 2 in progress · 1 queued`), and an empty string otherwise. If no queued or in-progress note has changed status for `stale_after` seconds (no Claude session is watching, or it stopped), the spinner stops and the text says so (`Claude: 1 queued · no update for 12m`). After a restart that time counts from the notes file's last change. For lualine:
 
 ```lua
 lualine_x = {
@@ -96,6 +96,7 @@ require("claude-notes").setup({
   hover_delay = 500,       -- ms before the popup
   max_label = 120,         -- characters of note or reply shown at the end of the line
   max_range_signs = 200,   -- range signs drawn for a long note
+  max_notes = 500,         -- notes drawn per file
   stale_after = 600,       -- seconds without a change before pending notes count as stuck
   git_timeout = 2000,      -- ms for the git call that finds a buffer's repository
 })
@@ -138,7 +139,9 @@ Signs use `DiagnosticWarn`, `DiagnosticHint`, `DiagnosticInfo` and `DiagnosticOk
 
 `status` is `open`, `queued`, `sent` or `done`. The plugin sets `open` and `queued`; the mod sets `sent`, `done`, `reply` and `claimedBy`.
 
-Both sides rewrite the whole file. The plugin keeps fields it doesn't know about, re-checks the file just before replacing it and redoes its change on the fresh copy if the mod wrote in between. A note with a missing or wrong-typed field, an unknown status, or a `file` that is absolute or contains `..` is skipped with a warning and left in the file untouched. A jump never opens a file that resolves outside the repository.
+Both sides rewrite the whole file. The plugin writes a temp file (mode `0600`, since notes hold code), syncs it and renames it over the old one, so a failed write leaves the old file intact. It keeps fields it doesn't know about, re-checks the file just before replacing it, and redoes its change on the fresh copy if the mod wrote in between or the read caught the mod mid-write (up to five tries). Nothing locks the file, so a mod write landing in the instant between that check and the rename can still be lost.
+
+A note is skipped with a warning, and left in the file untouched, when it is not an object; its `id`, `text` or `file` is missing, empty or not a string; its `status` is unknown; `start` and `end` are not whole numbers with `1 <= start <= end <= 10000000`; `reply` is set but not a string; or `file` is absolute or contains `..`, a backslash or a control character. Neither a jump nor the quickfix list opens a file that resolves outside the repository, for example through a symlink.
 
 ## Tests
 
@@ -146,4 +149,4 @@ Both sides rewrite the whole file. The plugin keeps fields it doesn't know about
 nvim --headless --clean -u NONE --cmd "set rtp+=." -l tests/run.lua
 ```
 
-The test builds a scratch git repository in a temp directory and removes it when it passes.
+Each case builds its own scratch git repository in a temp directory. They are removed when every case passes and kept for inspection when one fails.

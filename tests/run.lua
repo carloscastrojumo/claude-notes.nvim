@@ -390,9 +390,185 @@ case("clear and list", function()
   check(#data.notes == 1 and data.notes[1].id == "o1", "clear removes done notes only")
 end)
 
-vim.fn.delete(base, "rf")
+case("unsaved edits keep marks where the code is now", function()
+  write_notes({ version = 1, root = R, notes = { note("a1", { start = 4, ["end"] = 4 }) } })
+  open_app()
+  vim.api.nvim_buf_set_lines(0, 0, 0, false, { "// one", "// two" })
+  notes.add(1, 1, "another note while unsaved")
+  check(eol_text(6):find("note a1", 1, true) ~= nil, "the first note stays on its moved code after another write: " .. eol_text(6))
+  vim.cmd("silent write")
+  local moved = read_notes().notes[1]
+  check(moved.id == "a1" and moved.start == 6, "and saving records where it moved to: " .. moved.start)
+end)
+
+case("a failed write leaves the notes file as it was", function()
+  write_notes({ version = 1, root = R, notes = { note("a1") } })
+  open_app()
+  local _, before = read_notes()
+  local real_write = vim.uv.fs_write
+  vim.uv.fs_write = function()
+    return nil, "ENOSPC: no space left on device"
+  end
+  local ok = pcall(notes.add, 4, 4, "lost")
+  vim.uv.fs_write = real_write
+  local _, after = read_notes()
+  check(ok and after == before, "the original file is untouched")
+  check(notified[#notified]:find("ENOSPC", 1, true) ~= nil, "the error is reported: " .. notified[#notified])
+  local leftovers = vim.fn.glob(R .. "/.git/claude-notes.json.*.tmp", false, true)
+  check(#leftovers == 0, "no temp file is left behind")
+  notes.add(4, 4, "kept")
+  check(vim.uv.fs_stat(notes_path()).mode % 512 == 384, "the file is written readable by its owner only")
+end)
+
+case("a write retries while the mod is mid-write", function()
+  write_notes({ version = 1, root = R, notes = { note("a1", { start = 4, ["end"] = 4 }) } })
+  open_app()
+  local real_open = io.open
+  local reads = 0
+  io.open = function(path, mode)
+    if path == notes_path() and (mode == nil or mode == "r") then
+      reads = reads + 1
+      if reads == 1 then
+        return { read = function() return '{"version":1,"notes":[{"id"' end, close = function() end }
+      end
+    end
+    return real_open(path, mode)
+  end
+  local ok = pcall(notes.send)
+  io.open = real_open
+  check(ok and read_notes().notes[1].status == "queued", "send goes through after a half-written read")
+  check(notified[#notified] == "Queued 1 note for Claude", "with no error shown: " .. notified[#notified])
+end)
+
+case("nulls and odd values in the file are skipped without hiding later notes", function()
+  local fd = assert(io.open(notes_path(), "w"))
+  local with_null = vim.json.encode({ version = 1, root = R, notes = { note("a1", { start = 1, ["end"] = 1 }) } }):gsub('"notes":%[', '"notes":[null,')
+  fd:write(with_null)
+  fd:close()
+  local data = read_notes()
+  table.insert(data.notes, note("b1", { start = 4, ["end"] = 4 }))
+  table.insert(data.notes, note("c1", { file = "src/app\n.go" }))
+  table.insert(data.notes, note("d1", { start = 1, ["end"] = 1e12 }))
+  write_notes(data)
+  open_app()
+  check(eol_text(4):find("note b1", 1, true) ~= nil, "a note after a null is still drawn")
+  check(notified[1]:find("skipping 3 notes", 1, true) ~= nil, "the null, the newline path and the huge line are counted: " .. tostring(notified[1]))
+end)
+
+case("nothing is written when nothing changed", function()
+  write_notes({ version = 1, root = R, notes = { note("d1", { status = "sent" }) } })
+  open_app()
+  local before = vim.uv.fs_stat(notes_path())
+  notes.send()
+  notes.clear()
+  local after = vim.uv.fs_stat(notes_path())
+  check(before.mtime.nsec == after.mtime.nsec and before.ino == after.ino, "send and clear with nothing to do leave the file alone")
+  check(notified[#notified] == "no open notes to send", "and send still says so")
+end)
+
+case("deleting a queued note is allowed", function()
+  write_notes({ version = 1, root = R, notes = { note("q1", { status = "queued" }) } })
+  open_app()
+  vim.api.nvim_win_set_cursor(0, { 3, 0 })
+  notes.delete()
+  check(#read_notes().notes == 0, "a queued note no session has taken can be deleted")
+end)
+
+case("the quickfix list leaves out files outside the repository", function()
+  local outside = R .. "-outside"
+  vim.fn.mkdir(outside, "p")
+  vim.fn.writefile({ "x" }, outside .. "/f.txt")
+  assert(vim.uv.fs_symlink(outside, R .. "/link"))
+  write_notes({ version = 1, root = R, notes = { note("in1"), note("out1", { file = "link/f.txt", start = 1, ["end"] = 1 }) } })
+  open_app()
+  notes.list()
+  local items = vim.fn.getqflist()
+  check(#items == 1 and items[1].text:find("note in1", 1, true) ~= nil, "only the note inside the repository is listed")
+  vim.cmd("cclose")
+  vim.fn.delete(outside, "rf")
+end)
+
+case("huge replies and crowded files are capped", function()
+  write_notes({ version = 1, root = R, notes = { note("big", { status = "done", reply = string.rep("x", 100000) }) } })
+  open_app({ max_notes = 3 })
+  vim.api.nvim_win_set_cursor(0, { 3, 0 })
+  notes.show()
+  check(#(popup_text() or "") < 25000, "the popup shows a capped reply (" .. #(popup_text() or "") .. " chars)")
+  close_popups()
+  local many = {}
+  for i = 1, 10 do
+    many[i] = note("m" .. i, { start = 1, ["end"] = 1 })
+  end
+  write_notes({ version = 1, root = R, notes = many })
+  check(wait_for(function()
+    return #vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, {}) == 3
+  end), "only max_notes notes are drawn per file")
+  check(notified[#notified]:find("more than 3 notes", 1, true) ~= nil, "and the person is told: " .. notified[#notified])
+end)
+
+case("staleness counts from the last status change, and from the file for old notes", function()
+  write_notes({ version = 1, root = R, notes = { note("s1", { status = "sent" }) } })
+  local old = os.time() - 3600
+  vim.uv.fs_utime(notes_path(), old, old)
+  open_app({ stale_after = 60 })
+  check(_G.__claude_notes.spinner == nil, "a note sent an hour ago does not start the spinner")
+  check(notes.status():find("no update for 60m", 1, true) ~= nil, "and status says how long: " .. notes.status())
+  notes.add(1, 1, "unrelated")
+  check(_G.__claude_notes.spinner == nil, "adding an unrelated note does not count as progress")
+end)
+
+case("closed timers leave the registry", function()
+  write_notes({ version = 1, root = R, notes = {} })
+  open_app()
+  local base_count = #_G.__claude_notes.open
+  for _ = 1, 5 do
+    notes.add(4, 4, "x")
+    notes.send()
+    local data = read_notes()
+    for _, n in ipairs(data.notes) do
+      n.status = "done"
+    end
+    write_notes(data)
+    wait_for(function()
+      return _G.__claude_notes.spinner == nil
+    end)
+  end
+  check(#_G.__claude_notes.open <= base_count + 1, "spinner starts and stops do not pile up handles (" .. #_G.__claude_notes.open .. ")")
+end)
+
+case("files in a known directory don't run git again", function()
+  vim.fn.writefile({ "package main" }, R .. "/src/b.go")
+  open_app()
+  local real_system = vim.system
+  local calls = 0
+  vim.system = function(cmd, ...)
+    if cmd[1] == "git" then
+      calls = calls + 1
+    end
+    return real_system(cmd, ...)
+  end
+  vim.cmd("edit " .. R .. "/src/b.go")
+  vim.system = real_system
+  check(calls == 0, "opening a second file in the same directory reuses the repository (" .. calls .. " git calls)")
+end)
+
+case("a note's range follows edits made while its editor is open", function()
+  open_app()
+  local code_buf = vim.api.nvim_get_current_buf()
+  notes.add(4, 4)
+  local editor_buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(code_buf, 0, 0, false, { "// added above" })
+  vim.api.nvim_buf_set_lines(editor_buf, 0, -1, false, { "the println" })
+  vim.fn.maparg("<C-s>", "i", false, true).callback()
+  local added = read_notes().notes[1]
+  check(added.start == 5 and added.snippet:find("println", 1, true) ~= nil, "the note lands on the moved line: " .. added.start)
+end)
+
+if failures == 0 then
+  vim.fn.delete(base, "rf")
+end
 if failures > 0 then
-  io.stderr:write(failures .. " case(s) failed\n")
+  io.stderr:write(failures .. " case(s) failed; scratch repositories kept in " .. base .. "\n")
   os.exit(1)
 end
 print("all passed")
