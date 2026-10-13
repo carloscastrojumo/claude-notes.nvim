@@ -16,7 +16,7 @@ local SPINNER_MS = 120
 -- Opens the popup after the jump's own CursorMoved, which closes any preview opened before it.
 local POPUP_AFTER_JUMP_MS = 30
 local SPINNER = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
-local STATUSES = { open = true, queued = true, sent = true, done = true }
+local STATUSES = { open = true, queued = true, sent = true, question = true, done = true }
 
 local DEFAULTS = {
   keymaps = true,
@@ -36,6 +36,7 @@ local STYLE = {
   open = { sign = "✎", hl = "DiagnosticWarn", badge = " ✎ note ", group = "Open" },
   queued = { sign = "⇡", hl = "DiagnosticHint", badge = " ⇡ queued ", group = "Queued" },
   sent = { sign = "…", hl = "DiagnosticInfo", badge = " … Claude working ", group = "Sent" },
+  question = { sign = "?", hl = "DiagnosticError", badge = " ? Claude asks ", group = "Question" },
   done = { sign = "✓", hl = "DiagnosticOk", badge = " ✓ Claude ", group = "Done" },
 }
 
@@ -176,7 +177,26 @@ local function is_valid(note)
   if start < 1 or stop < start or stop > MAX_LINE then
     return false
   end
-  return note.reply == nil or type(note.reply) == "string"
+  if note.reply ~= nil and type(note.reply) ~= "string" then
+    return false
+  end
+  if note.thread == nil then
+    return true
+  end
+  if type(note.thread) ~= "table" then
+    return false
+  end
+  for _, entry in ipairs(note.thread) do
+    if type(entry) ~= "table" or (entry.from ~= "claude" and entry.from ~= "you") or type(entry.text) ~= "string" then
+      return false
+    end
+  end
+  return true
+end
+
+local function last_question(note)
+  local entry = note.thread and note.thread[#note.thread]
+  return entry and entry.from == "claude" and entry.text or nil
 end
 
 local function split_valid(notes)
@@ -389,7 +409,13 @@ local function render(buf)
       local at = live[note.id]
       local first = math.min(at and at.first or (note.start - 1), count - 1)
       local last = math.min(math.max(at and at.last or (note["end"] - 1), first), count - 1)
-      local label = one_line(note.status == "done" and (note.reply or "done") or note.text, config.max_label)
+      local label = note.text
+      if note.status == "done" then
+        label = note.reply or "done"
+      elseif note.status == "question" then
+        label = last_question(note) or note.text
+      end
+      label = one_line(label, config.max_label)
       local last_line = vim.api.nvim_buf_get_lines(buf, last, last + 1, false)[1] or ""
       local id = vim.api.nvim_buf_set_extmark(buf, ns, first, 0, {
         end_row = last,
@@ -425,14 +451,18 @@ local function announce(before, after)
   for _, note in ipairs(before) do
     was[note.id] = note.status
   end
-  local count = 0
+  local finished, asked = 0, 0
   for _, note in ipairs(after) do
-    if note.status == "done" and was[note.id] ~= nil and was[note.id] ~= "done" then
-      count = count + 1
+    if was[note.id] ~= nil and was[note.id] ~= note.status then
+      finished = finished + (note.status == "done" and 1 or 0)
+      asked = asked + (note.status == "question" and 1 or 0)
     end
   end
-  if count > 0 then
-    notify("Claude finished " .. plural(count, "note"))
+  if finished > 0 then
+    notify("Claude finished " .. plural(finished, "note"))
+  end
+  if asked > 0 then
+    notify(string.format("Claude has a question on %s; answer with %sr", plural(asked, "note"), config.prefix), vim.log.levels.WARN)
   end
 end
 
@@ -661,9 +691,14 @@ local function popup(note)
   local lines = { string.format("**%s** · `%s:%s`", vim.trim(style.badge), file, range_label(note)), "" }
   if note.reply then
     vim.list_extend(lines, vim.split(capped(note.reply), "\n"))
-    vim.list_extend(lines, { "", "---", "", "*Your note:*" })
+    vim.list_extend(lines, { "", "---", "" })
   end
+  vim.list_extend(lines, { "*Your note:*" })
   vim.list_extend(lines, vim.split(capped(note.text), "\n"))
+  for _, entry in ipairs(note.thread or {}) do
+    vim.list_extend(lines, { "", entry.from == "claude" and "**Claude asked:**" or "*You answered:*" })
+    vim.list_extend(lines, vim.split(capped(entry.text), "\n"))
+  end
   local _, win = vim.lsp.util.open_floating_preview(lines, "markdown", {
     border = "rounded",
     focus_id = "claude-notes",
@@ -690,7 +725,7 @@ local function hover_later()
     local buf = vim.api.nvim_get_current_buf()
     local repo = cached_repo(buf)
     local note = repo and note_under_cursor(buf, repo)
-    if note and note.status == "done" and not is_shown(note) then
+    if note and (note.status == "done" or note.status == "question") and not is_shown(note) then
       popup(note)
     end
   end))
@@ -724,7 +759,7 @@ local function jump(step)
     return
   end
   local replies = vim.tbl_filter(function(note)
-    return note.status == "done"
+    return note.status == "done" or note.status == "question"
   end, repo.notes)
   if #replies == 0 then
     notify("no Claude replies yet")
@@ -938,6 +973,40 @@ function M.edit()
   end)
 end
 
+function M.reply()
+  local repo, note = note_at_cursor()
+  if not note then
+    return
+  end
+  local question = note.status == "question" and last_question(note)
+  if not question then
+    notify("Claude has no open question on this note", vim.log.levels.WARN)
+    return
+  end
+  for _, buf in ipairs(repo_buffers(repo)) do
+    if vim.bo[buf].modified and relpath(repo, buf) == note.file then
+      notify("save first, Claude reads the files on disk: " .. note.file, vim.log.levels.WARN)
+      return
+    end
+  end
+  editor("Answer Claude · " .. one_line(question, 60), "", function(text)
+    local saved, why = update_notes(repo, function(notes)
+      local current = find_by_id(notes, note.id)
+      if not current or current.status ~= "question" then
+        return "reject"
+      end
+      current.thread = current.thread or {}
+      table.insert(current.thread, { from = "you", text = text })
+      current.status = "queued"
+    end)
+    if saved then
+      notify("Answer queued for Claude")
+    else
+      keep_text(text, why == "rejected" and "the question was answered or removed meanwhile" or "the answer was not saved")
+    end
+  end)
+end
+
 function M.delete()
   local repo, note = note_at_cursor()
   if not note then
@@ -1097,15 +1166,24 @@ function M.status()
     return ""
   end
   local queued, sent = count_pending(repo.notes)
-  if queued + sent == 0 then
+  local questions = #vim.tbl_filter(function(note)
+    return note.status == "question"
+  end, repo.notes)
+  if queued + sent + questions == 0 then
     return ""
   end
   local parts = {}
+  if questions > 0 then
+    table.insert(parts, plural(questions, "question"))
+  end
   if sent > 0 then
     table.insert(parts, sent .. " in progress")
   end
   if queued > 0 then
     table.insert(parts, queued .. " queued")
+  end
+  if queued + sent == 0 then
+    return "? Claude: " .. table.concat(parts, " · ")
   end
   if is_stale(repo) then
     local minutes = math.floor((now() - repo.changed_at) / 60)
@@ -1131,6 +1209,7 @@ local function actions()
     { name = "ClaudeNotePrev", key = "p", desc = "previous reply", run = M.prev_reply },
     { name = "ClaudeNoteShow", key = "s", desc = "show the note on this line", run = M.show },
     { name = "ClaudeNoteEdit", key = "e", desc = "edit the note on this line", run = M.edit },
+    { name = "ClaudeNoteReply", key = "r", desc = "answer Claude's question on this line", run = M.reply },
     { name = "ClaudeNoteDelete", key = "d", desc = "delete the note on this line", run = M.delete },
     { name = "ClaudeNotes", key = "l", desc = "list notes in quickfix", run = M.list },
     { name = "ClaudeNotesClear", key = "c", desc = "clear done notes", run = M.clear },

@@ -662,6 +662,88 @@ case("deleting the lines of a done note warns too", function()
   check(notified[#notified]:find("was deleted", 1, true) ~= nil, "and the person is told: " .. tostring(notified[#notified]))
 end)
 
+case("a question from Claude shows up, and the answer goes back queued", function()
+  write_notes({ version = 1, root = R, notes = { note("q1", { start = 4, ["end"] = 4, status = "sent" }) } })
+  open_app()
+  local data = read_notes()
+  data.notes[1].status = "question"
+  data.notes[1].thread = { { from = "claude", text = "Which timeout?\nThere are two." } }
+  write_notes(data)
+  check(wait_for(function()
+    return notes.status():find("question", 1, true) ~= nil
+  end), "the status line counts the question: " .. notes.status())
+  check(notes.status() == "? Claude: 1 question", "and needs no spinner: " .. notes.status())
+  check(table.concat(notified, "\n"):find("Claude has a question on 1 note", 1, true) ~= nil, "the person is told")
+  local chunks = eol_chunks(4)
+  check(chunks[2] and chunks[2][1] == " ? Claude asks " and chunks[3][1] == " Which timeout? … ", "the line shows the question: " .. eol_text(4))
+
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  vim.api.nvim_exec_autocmds("CursorMoved", {})
+  check(wait_for(function()
+    return popup_text() ~= nil
+  end), "resting on it pops up the question")
+  check(popup_text():find("**Claude asked:**\nWhich timeout?\nThere are two.", 1, true) ~= nil, "with the whole question: " .. tostring(popup_text()))
+  close_popups()
+
+  notes.reply()
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "the read timeout" })
+  vim.fn.maparg("<C-s>", "i", false, true).callback()
+  local answered = read_notes().notes[1]
+  check(answered.status == "queued", "answering queues the note again")
+  check(#answered.thread == 2 and answered.thread[2].from == "you" and answered.thread[2].text == "the read timeout", "and adds the answer to its thread")
+  check(notified[#notified] == "Answer queued for Claude", "the person is told")
+end)
+
+case("answering is refused when there is no question, or the code is unsaved", function()
+  write_notes({ version = 1, root = R, notes = { note("o1", { start = 4, ["end"] = 4 }), note("q1", { start = 3, ["end"] = 3, status = "question", thread = { { from = "claude", text = "Why?" } } }) } })
+  open_app()
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  notes.reply()
+  check(notified[#notified] == "Claude has no open question on this note", "no question, no editor")
+  vim.api.nvim_buf_set_lines(0, 0, 0, false, { "// unsaved" })
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  notes.reply()
+  check(notified[#notified]:find("save first", 1, true) ~= nil, "unsaved code blocks the answer: " .. notified[#notified])
+end)
+
+case("an answer saved after the question went away is kept in the register", function()
+  write_notes({ version = 1, root = R, notes = { note("q1", { start = 4, ["end"] = 4, status = "question", thread = { { from = "claude", text = "Why?" } } }) } })
+  open_app()
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  notes.reply()
+  local editor_buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(editor_buf, 0, -1, false, { "because" })
+  local data = read_notes()
+  data.notes[1].status = "done"
+  data.notes[1].reply = "worked it out"
+  write_notes(data)
+  settle(400)
+  vim.fn.maparg("<C-s>", "i", false, true).callback()
+  check(read_notes().notes[1].status == "done", "the note is left as Claude set it")
+  check(vim.fn.getreg('"') == "because", "the answer is in the unnamed register")
+end)
+
+case("next/previous reply also stops on questions", function()
+  write_notes({ version = 1, root = R, notes = {
+    note("d1", { start = 1, ["end"] = 1, status = "done", reply = "ok" }),
+    note("q1", { start = 4, ["end"] = 4, status = "question", thread = { { from = "claude", text = "Why?" } } }),
+  } })
+  open_app()
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  notes.next_reply()
+  check(vim.api.nvim_win_get_cursor(0)[1] == 4, "next goes to the question")
+  check(wait_for(function()
+    return popup_text() ~= nil
+  end, 500) and popup_text():find("Why?", 1, true) ~= nil, "and shows it")
+end)
+
+case("a malformed thread makes the note malformed", function()
+  write_notes({ version = 1, root = R, notes = { note("q1", { status = "question", thread = { { from = "bot", text = "x" } } }), note("o1", { start = 4, ["end"] = 4 }) } })
+  open_app()
+  check(eol_text(4):find("note o1", 1, true) ~= nil, "the good note is drawn")
+  check(notified[1]:find("skipping 1 note", 1, true) ~= nil, "the bad one is skipped: " .. tostring(notified[1]))
+end)
+
 if failures == 0 then
   vim.fn.delete(base, "rf")
 end
