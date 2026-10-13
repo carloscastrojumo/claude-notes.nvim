@@ -50,8 +50,9 @@ end
 local state = new_state()
 
 -- Survives :Lazy reload, which loads a fresh module while the old one's timers keep running.
-_G.__claude_notes = _G.__claude_notes or { open = {} }
+_G.__claude_notes = _G.__claude_notes or {}
 local registry = _G.__claude_notes
+registry.open = registry.open or {}
 
 local function track(handle)
   table.insert(registry.open, handle)
@@ -78,7 +79,14 @@ local function teardown()
   for i = #registry.open, 1, -1 do
     close(registry.open[i])
   end
-  registry.open, registry.spinner, registry.hover = {}, nil, nil
+  -- Earlier versions of this plugin kept their timers and watchers under `handles`.
+  for _, handle in ipairs(registry.handles or {}) do
+    if not handle:is_closing() then
+      handle:stop()
+      handle:close()
+    end
+  end
+  registry.open, registry.handles, registry.spinner, registry.hover = {}, nil, nil, nil
 end
 
 local function now()
@@ -223,6 +231,10 @@ local function write_file(repo, data)
   end
   local written, write_err = vim.uv.fs_write(fd, text)
   local synced, sync_err = vim.uv.fs_fsync(fd)
+  -- Some network and FUSE mounts have no fsync; the rename still replaces the file whole.
+  if not synced and (tostring(sync_err):match("^EINVAL") or tostring(sync_err):match("^ENOTSUP")) then
+    synced = true
+  end
   local closed, close_err = vim.uv.fs_close(fd)
   local err = (written ~= #text and (write_err or "short write")) or (not synced and sync_err) or (not closed and close_err)
   if not err then
@@ -493,12 +505,13 @@ end
 
 -- change returns "reject", "skip" or nothing (write); nothing locks the file, so it is re-checked before replacing.
 local function update_notes(repo, change)
-  local err = "the notes file kept changing while saving; try again"
+  local err
   for attempt = 1, WRITE_ATTEMPTS do
     if attempt > 1 then
       vim.uv.sleep(WRITE_RETRY_MS)
     end
     local data, stat, read_err = read_file(repo)
+    err = read_err or "the notes file kept changing while saving; try again"
     if data then
       local ok, verdict = pcall(change, data.notes)
       if not ok then
@@ -521,8 +534,6 @@ local function update_notes(repo, change)
         apply(repo, data, written)
         return true
       end
-    else
-      err = read_err
     end
   end
   notify(err, vim.log.levels.WARN)
@@ -607,7 +618,6 @@ local function repo_for(buf, quiet)
   repo = repo_at(vim.fs.dirname(path), quiet)
   if repo then
     vim.b[buf].claude_notes_path = repo.path
-    render(buf)
   end
   return repo
 end
@@ -763,12 +773,22 @@ local function new_id(notes)
   error("could not find a free note id")
 end
 
-local function editor(title, initial, on_submit)
+local function editor(title, initial, on_submit, on_cancel)
   initial = initial or ""
+  local is_submitted = false
   local buf = vim.api.nvim_create_buf(false, true)
   vim.b[buf].completion = false
   vim.bo[buf].filetype = "markdown"
   vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_create_autocmd("BufWipeout", {
+    buffer = buf,
+    once = true,
+    callback = function()
+      if not is_submitted and on_cancel then
+        on_cancel()
+      end
+    end,
+  })
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(initial, "\n"))
   local width = math.max(20, math.min(80, vim.o.columns - 4))
   local height = math.max(3, math.min(10, vim.o.lines - 6))
@@ -794,6 +814,7 @@ local function editor(title, initial, on_submit)
   end
   local function submit()
     local written = text()
+    is_submitted = written ~= ""
     vim.cmd("stopinsert")
     close_window()
     if written ~= "" then
@@ -868,21 +889,23 @@ function M.add(line1, line2, text)
     return
   end
   -- The buffer can change while the editor is open, so the range is read back from a mark on save.
-  vim.api.nvim_buf_clear_namespace(buf, anchor_ns, 0, -1)
   local last_line = vim.api.nvim_buf_get_lines(buf, line2 - 1, line2, false)[1] or ""
   local anchor = vim.api.nvim_buf_set_extmark(buf, anchor_ns, line1 - 1, 0, { end_row = line2 - 1, end_col = #last_line, invalidate = true })
+  local function drop_anchor()
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_del_extmark(buf, anchor_ns, anchor)
+    end
+  end
   editor("Note for Claude · " .. rel .. ":" .. range_label({ start = line1, ["end"] = line2 }), "", function(note_text)
     local pos = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_extmark_by_id(buf, anchor_ns, anchor, { details = true }) or {}
-    if vim.api.nvim_buf_is_valid(buf) then
-      vim.api.nvim_buf_clear_namespace(buf, anchor_ns, 0, -1)
-    end
+    drop_anchor()
     if not pos[1] or pos[3].invalid then
       vim.fn.setreg('"', note_text)
       notify('the lines for this note are gone; your text is in the " register', vim.log.levels.WARN)
       return
     end
     save(note_text, pos[1] + 1, (pos[3].end_row or pos[1]) + 1)
-  end)
+  end, drop_anchor)
 end
 
 function M.edit()
@@ -944,6 +967,10 @@ function M.list()
   end
   local items = {}
   for _, note in ipairs(repo.notes) do
+    if #items >= config.max_notes then
+      notify(string.format("listing the first %d notes of %d", config.max_notes, #repo.notes), vim.log.levels.WARN)
+      break
+    end
     local path, _, is_outside = file_of(repo, note.file)
     if not is_outside then
       local text = string.format("[%s] %s", note.status, one_line(note.text, config.max_label))
@@ -1035,12 +1062,12 @@ local function sync_positions(buf)
   state.orphans[buf] = {}
   local moves = {}
   for _, note in ipairs(repo.notes) do
-    local is_movable = note.status == "open" or note.status == "queued"
     local to = positions[note.id]
-    if is_movable and orphans[note.id] and not state.orphan_warned[note.id] then
+    local is_waiting = note.status == "open" or note.status == "queued"
+    if orphans[note.id] and is_waiting and not state.orphan_warned[note.id] then
       state.orphan_warned[note.id] = true
       notify(string.format("the code under note %s was deleted; the note stays at %s:%d", note.id, note.file, note.start), vim.log.levels.WARN)
-    elseif is_movable and to and (to.start ~= note.start or to["end"] ~= note["end"]) then
+    elseif to and (to.start ~= note.start or to["end"] ~= note["end"]) then
       moves[note.id] = to
     end
   end
@@ -1051,7 +1078,7 @@ local function sync_positions(buf)
   update_notes(repo, function(notes)
     for _, note in ipairs(notes) do
       local to = is_valid(note) and moves[note.id]
-      if to and (note.status == "open" or note.status == "queued") then
+      if to then
         note.start, note["end"] = to.start, to["end"]
       end
     end
@@ -1131,13 +1158,13 @@ local function create_autocmds(group)
   vim.api.nvim_create_autocmd("BufWipeout", {
     group = group,
     callback = function(ev)
-      state.marks[ev.buf] = nil
+      state.marks[ev.buf], state.orphans[ev.buf], state.crowded_warned[ev.buf] = nil, nil, nil
     end,
   })
   vim.api.nvim_create_autocmd("DirChanged", {
     group = group,
     callback = function()
-      state.no_repo = {}
+      state.no_repo, state.dir_repo = {}, {}
     end,
   })
   if config.hover then

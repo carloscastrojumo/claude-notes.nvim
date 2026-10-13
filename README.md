@@ -58,12 +58,12 @@ If Claude changed a file you have open, reload it with `:e` (or `:checktime`).
 | `<leader>as` | `:ClaudeNoteShow` | Show the note on this line and its reply |
 | `<leader>ae` | `:ClaudeNoteEdit` | Edit the note on this line, while it is still open |
 | `<leader>ad` | `:ClaudeNoteDelete` | Delete the note on this line; open, queued and done notes can go, a note Claude is working on cannot |
-| `<leader>al` | `:ClaudeNotes` | All notes in the quickfix list, for the current buffer's repository or else the working directory's |
+| `<leader>al` | `:ClaudeNotes` | Notes in the quickfix list (up to `max_notes`), for the current buffer's repository or else the working directory's |
 | `<leader>ac` | `:ClaudeNotesClear` | Remove the done notes |
 
 In the note editor: `<C-s>` saves (insert or normal mode), `q` or `<Esc>` cancels and asks first if you wrote something.
 
-Notes follow your edits: while a buffer has unsaved changes its signs stay on the code they were placed on, and saving records the new lines for open and queued notes. Notes Claude has taken stay where they were. If you delete every line a note covers, the note stays at its old line and you get a warning, instead of sliding onto the code next to it.
+Notes follow your edits: while a buffer has unsaved changes its signs stay on the code they were placed on, and saving records the new lines for every note. A new note's range is taken when you save it in the editor, so edits made while the editor is open don't throw it off. Notes Claude has taken stay where they were. If you delete every line a note covers, the note stays at its old line and you get a warning, instead of sliding onto the code next to it.
 
 If a note is sent while you are editing it, saving the edit leaves the note alone and puts your text in the `"` register.
 
@@ -96,7 +96,7 @@ require("claude-notes").setup({
   hover_delay = 500,       -- ms before the popup
   max_label = 120,         -- characters of note or reply shown at the end of the line
   max_range_signs = 200,   -- range signs drawn for a long note
-  max_notes = 500,         -- notes drawn per file
+  max_notes = 500,         -- notes drawn per file, and listed by :ClaudeNotes
   stale_after = 600,       -- seconds without a change before pending notes count as stuck
   git_timeout = 2000,      -- ms for the git call that finds a buffer's repository
 })
@@ -139,9 +139,15 @@ Signs use `DiagnosticWarn`, `DiagnosticHint`, `DiagnosticInfo` and `DiagnosticOk
 
 `status` is `open`, `queued`, `sent` or `done`. The plugin sets `open` and `queued`; the mod sets `sent`, `done`, `reply` and `claimedBy`.
 
-Both sides rewrite the whole file. The plugin writes a temp file (mode `0600`, since notes hold code), syncs it and renames it over the old one, so a failed write leaves the old file intact. It keeps fields it doesn't know about, re-checks the file just before replacing it, and redoes its change on the fresh copy if the mod wrote in between or the read caught the mod mid-write (up to five tries). Nothing locks the file, so a mod write landing in the instant between that check and the rename can still be lost.
+Both sides rewrite the whole file. The plugin writes a temp file (mode `0600`, since notes hold code), syncs it (where the filesystem supports fsync) and renames it over the old one, so a failed write leaves the old file intact. It keeps fields it doesn't know about, re-checks the file just before replacing it, and redoes its change on the fresh copy if the mod wrote in between or the read caught the mod mid-write (up to five tries). A note is skipped with a warning, and left in the file untouched, when it is not an object; its `id` or `file` is missing, empty or not a string; its `text` is missing or not a string; its `status` is unknown; `start` and `end` are not whole numbers with `1 <= start <= end <= 10000000`; `reply` is set but not a string; or `file` is absolute or contains `..`, a backslash or a control character. Neither a jump nor the quickfix list opens a file that resolves outside the repository, for example through a symlink.
 
-A note is skipped with a warning, and left in the file untouched, when it is not an object; its `id`, `text` or `file` is missing, empty or not a string; its `status` is unknown; `start` and `end` are not whole numbers with `1 <= start <= end <= 10000000`; `reply` is set but not a string; or `file` is absolute or contains `..`, a backslash or a control character. Neither a jump nor the quickfix list opens a file that resolves outside the repository, for example through a symlink.
+## Known limitations
+
+- Nothing locks the notes file. A mod write that lands in the instant between the plugin's last check and its rename is lost.
+- While the mod is mid-write, a save can wait up to about 200 ms for it to finish.
+- The rename isn't followed by a directory fsync, so a power cut right after a write can lose that write.
+- A directory's repository is remembered until you change directory (`:cd`), so a repository created inside it later isn't noticed before then.
+- One Neovim per repository is assumed; two Neovims writing the same notes file at once rely on the same unlocked check.
 
 ## Tests
 

@@ -529,11 +529,11 @@ case("closed timers leave the registry", function()
       n.status = "done"
     end
     write_notes(data)
-    wait_for(function()
+    check(wait_for(function()
       return _G.__claude_notes.spinner == nil
-    end)
+    end), "the spinner stops after round " .. _)
   end
-  check(#_G.__claude_notes.open <= base_count + 1, "spinner starts and stops do not pile up handles (" .. #_G.__claude_notes.open .. ")")
+  check(#_G.__claude_notes.open == base_count, "spinner starts and stops do not pile up handles (" .. #_G.__claude_notes.open .. " vs " .. base_count .. ")")
 end)
 
 case("files in a known directory don't run git again", function()
@@ -562,6 +562,70 @@ case("a note's range follows edits made while its editor is open", function()
   vim.fn.maparg("<C-s>", "i", false, true).callback()
   local added = read_notes().notes[1]
   check(added.start == 5 and added.snippet:find("println", 1, true) ~= nil, "the note lands on the moved line: " .. added.start)
+end)
+
+case("reloading over an older version closes its timers instead of failing", function()
+  local old_timer = vim.uv.new_timer()
+  old_timer:start(100000, 0, function() end)
+  _G.__claude_notes = { handles = { old_timer } }
+  package.loaded["claude-notes"] = nil
+  local fresh = require("claude-notes")
+  local ok, err = pcall(fresh.setup, {})
+  notes = fresh
+  check(ok, "setup works with the older version's state: " .. tostring(err))
+  check(old_timer:is_closing(), "and closes the older version's timers")
+end)
+
+case("notes Claude has also follow edits on save", function()
+  write_notes({ version = 1, root = R, notes = { note("s1", { status = "sent", start = 4, ["end"] = 4 }), note("d1", { status = "done", reply = "ok", start = 3, ["end"] = 3 }) } })
+  open_app()
+  vim.api.nvim_buf_set_lines(0, 0, 0, false, { "// added" })
+  vim.cmd("silent write")
+  local data = read_notes()
+  check(data.notes[1].start == 5 and data.notes[2].start == 4, "sent and done notes record their new lines")
+  check(eol_text(5):find("Claude working", 1, true) ~= nil and eol_text(4):find("ok", 1, true) ~= nil, "and their signs stay on the code")
+end)
+
+case("two notes started at once both land on their lines", function()
+  open_app()
+  local code_win = vim.api.nvim_get_current_win()
+  notes.add(4, 4)
+  local first = vim.api.nvim_get_current_buf()
+  vim.api.nvim_set_current_win(code_win)
+  notes.add(1, 1)
+  local second = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(second, 0, -1, false, { "second" })
+  vim.fn.maparg("<C-s>", "i", false, true).callback()
+  vim.api.nvim_set_current_win(vim.fn.bufwinid(first))
+  vim.api.nvim_buf_set_lines(first, 0, -1, false, { "first" })
+  vim.fn.maparg("<C-s>", "i", false, true).callback()
+  local by_text = {}
+  for _, n in ipairs(read_notes().notes) do
+    by_text[n.text] = n.start
+  end
+  check(by_text.first == 4 and by_text.second == 1, "neither note's range is lost: " .. vim.inspect(by_text))
+end)
+
+case("a cancelled note leaves no anchor behind", function()
+  open_app()
+  local code_buf = vim.api.nvim_get_current_buf()
+  notes.add(4, 4)
+  vim.cmd("stopinsert")
+  vim.fn.maparg("q", "n", false, true).callback()
+  local anchors = vim.api.nvim_buf_get_extmarks(code_buf, vim.api.nvim_create_namespace("claude-notes-anchor"), 0, -1, {})
+  check(#anchors == 0, "the anchor is removed when the editor closes without saving")
+end)
+
+case("the quickfix list is capped", function()
+  local many = {}
+  for i = 1, 10 do
+    many[i] = note("m" .. i)
+  end
+  write_notes({ version = 1, root = R, notes = many })
+  open_app({ max_notes = 4 })
+  notes.list()
+  check(#vim.fn.getqflist() == 4, "only max_notes notes are listed")
+  vim.cmd("cclose")
 end)
 
 if failures == 0 then
