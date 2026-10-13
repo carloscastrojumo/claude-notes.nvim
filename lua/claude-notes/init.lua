@@ -685,6 +685,16 @@ local function capped(text)
   return vim.fn.strcharpart(text, 0, MAX_POPUP_CHARS) .. "\n\n… (cut; the rest is in the notes file)"
 end
 
+local function conversation(note)
+  local lines = { "*Your note:*" }
+  vim.list_extend(lines, vim.split(capped(note.text), "\n"))
+  for _, entry in ipairs(note.thread or {}) do
+    vim.list_extend(lines, { "", entry.from == "claude" and "**Claude asked:**" or "*You answered:*" })
+    vim.list_extend(lines, vim.split(capped(entry.text), "\n"))
+  end
+  return lines
+end
+
 local function popup(note)
   local style = STYLE[note.status]
   local file = note.file:gsub("`", "'")
@@ -693,12 +703,7 @@ local function popup(note)
     vim.list_extend(lines, vim.split(capped(note.reply), "\n"))
     vim.list_extend(lines, { "", "---", "" })
   end
-  vim.list_extend(lines, { "*Your note:*" })
-  vim.list_extend(lines, vim.split(capped(note.text), "\n"))
-  for _, entry in ipairs(note.thread or {}) do
-    vim.list_extend(lines, { "", entry.from == "claude" and "**Claude asked:**" or "*You answered:*" })
-    vim.list_extend(lines, vim.split(capped(entry.text), "\n"))
-  end
+  vim.list_extend(lines, conversation(note))
   local _, win = vim.lsp.util.open_floating_preview(lines, "markdown", {
     border = "rounded",
     focus_id = "claude-notes",
@@ -808,9 +813,51 @@ local function new_id(notes)
   error("could not find a free note id")
 end
 
-local function editor(title, initial, on_submit, on_cancel)
+local function wrapped_height(lines, width)
+  local rows = 0
+  for _, line in ipairs(lines) do
+    rows = rows + math.max(1, math.ceil(vim.fn.strdisplaywidth(line) / width))
+  end
+  return rows
+end
+
+-- opts.context: lines shown read-only above the editor (the question being answered).
+local function editor(title, initial, on_submit, on_cancel, opts)
   initial = initial or ""
+  opts = opts or {}
   local is_submitted = false
+  local width = math.max(20, math.min(80, vim.o.columns - 4))
+  local col = math.max(0, math.floor((vim.o.columns - width) / 2))
+  local height = math.max(3, math.min(opts.context and 6 or 10, vim.o.lines - 6))
+  local context_height = 0
+  if opts.context then
+    context_height = math.max(1, math.min(15, wrapped_height(opts.context, width), vim.o.lines - height - 8))
+  end
+  local top = math.max(0, math.floor((vim.o.lines - height - 2 - (opts.context and context_height + 2 or 0)) / 2))
+
+  local context_win
+  if opts.context then
+    local context_buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[context_buf].bufhidden = "wipe"
+    vim.api.nvim_buf_set_lines(context_buf, 0, -1, false, opts.context)
+    vim.bo[context_buf].modifiable = false
+    vim.bo[context_buf].filetype = "markdown"
+    context_win = vim.api.nvim_open_win(context_buf, false, {
+      relative = "editor",
+      width = width,
+      height = context_height,
+      row = top,
+      col = col,
+      style = "minimal",
+      border = "rounded",
+      title = " " .. (opts.context_title or "Context") .. " ",
+      focusable = false,
+    })
+    vim.wo[context_win].wrap = true
+    vim.wo[context_win].linebreak = true
+    top = top + context_height + 2
+  end
+
   local buf = vim.api.nvim_create_buf(false, true)
   vim.b[buf].completion = false
   vim.bo[buf].filetype = "markdown"
@@ -819,26 +866,40 @@ local function editor(title, initial, on_submit, on_cancel)
     buffer = buf,
     once = true,
     callback = function()
+      if context_win and vim.api.nvim_win_is_valid(context_win) then
+        vim.api.nvim_win_close(context_win, true)
+      end
       if not is_submitted and on_cancel then
         on_cancel()
       end
     end,
   })
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(initial, "\n"))
-  local width = math.max(20, math.min(80, vim.o.columns - 4))
-  local height = math.max(3, math.min(10, vim.o.lines - 6))
   local win = vim.api.nvim_open_win(buf, true, {
     relative = "editor",
     width = width,
     height = height,
-    row = math.max(0, math.floor((vim.o.lines - height) / 2)),
-    col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+    row = top,
+    col = col,
     style = "minimal",
     border = "rounded",
     title = " " .. title .. " ",
-    footer = " <C-s> save · q cancel ",
+    footer = opts.context and " <C-s> save · q cancel · <C-f>/<C-b> scroll above " or " <C-s> save · q cancel ",
     footer_pos = "right",
   })
+  if context_win then
+    local function scroll(keys)
+      return function()
+        if vim.api.nvim_win_is_valid(context_win) then
+          vim.api.nvim_win_call(context_win, function()
+            vim.cmd("normal! " .. vim.keycode(keys))
+          end)
+        end
+      end
+    end
+    vim.keymap.set({ "n", "i" }, "<C-f>", scroll("<C-d>"), { buffer = buf, desc = "Scroll the question down" })
+    vim.keymap.set({ "n", "i" }, "<C-b>", scroll("<C-u>"), { buffer = buf, desc = "Scroll the question up" })
+  end
   local function text()
     return vim.trim(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
   end
@@ -989,7 +1050,7 @@ function M.reply()
       return
     end
   end
-  editor("Answer Claude · " .. one_line(question, 60), "", function(text)
+  editor("Your answer", "", function(text)
     local saved, why = update_notes(repo, function(notes)
       local current = find_by_id(notes, note.id)
       if not current or current.status ~= "question" then
@@ -1004,7 +1065,7 @@ function M.reply()
     else
       keep_text(text, why == "rejected" and "the question was answered or removed meanwhile" or "the answer was not saved")
     end
-  end)
+  end, nil, { context = conversation(note), context_title = "Claude asks · " .. note.file .. ":" .. range_label(note) })
 end
 
 function M.delete()

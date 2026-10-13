@@ -744,6 +744,42 @@ case("a malformed thread makes the note malformed", function()
   check(notified[1]:find("skipping 1 note", 1, true) ~= nil, "the bad one is skipped: " .. tostring(notified[1]))
 end)
 
+case("the question stays visible above the answer box", function()
+  local long = {}
+  for i = 1, 40 do
+    long[i] = "line " .. i .. " of a long question"
+  end
+  write_notes({ version = 1, root = R, notes = { note("q1", { start = 4, ["end"] = 4, status = "question", text = "ask me", thread = { { from = "claude", text = table.concat(long, "\n") } } }) } })
+  open_app()
+  local function floats()
+    return vim.tbl_filter(function(win)
+      return vim.api.nvim_win_get_config(win).relative ~= ""
+    end, vim.api.nvim_list_wins())
+  end
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  notes.reply()
+  local editor_win = vim.api.nvim_get_current_win()
+  local panel = vim.tbl_filter(function(win)
+    return win ~= editor_win
+  end, floats())[1]
+  check(#floats() == 2 and panel ~= nil, "answering opens the question panel and the answer box")
+  local panel_text = table.concat(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(panel), 0, -1, false), "\n")
+  check(panel_text:find("*Your note:*\nask me", 1, true) ~= nil and panel_text:find("**Claude asked:**\nline 1 of", 1, true) ~= nil, "the panel shows the note and the whole question")
+  check(vim.api.nvim_win_get_config(panel).row < vim.api.nvim_win_get_config(editor_win).row, "the panel sits above the answer box")
+  check(vim.fn.getwininfo(panel)[1].topline == 1, "the panel starts at the top")
+  vim.fn.maparg("<C-f>", "i", false, true).callback()
+  check(vim.fn.getwininfo(panel)[1].topline > 1, "<C-f> scrolls the question")
+  vim.cmd("stopinsert")
+  vim.fn.maparg("q", "n", false, true).callback()
+  check(#floats() == 0, "cancelling closes both")
+
+  notes.reply()
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "answer" })
+  vim.fn.maparg("<C-s>", "i", false, true).callback()
+  check(#floats() == 0, "saving closes both")
+  check(read_notes().notes[1].status == "queued", "and the answer is queued")
+end)
+
 if failures == 0 then
   vim.fn.delete(base, "rf")
 end
