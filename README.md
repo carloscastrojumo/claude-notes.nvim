@@ -27,7 +27,7 @@ Needs Neovim 0.11+, git, and Claude Code with the nvim-notes mod (`claude --plug
 1. In Claude Code, run `/notes watch` in the session that should work on your notes.
 2. In Neovim, press `<leader>aa` on a line or a visual selection, write the note, `<C-s>` to save.
 3. Save your files and press `<leader>aS` to send. Unsaved buffers with notes block the send, because Claude reads the files on disk.
-4. If Claude needs more from you, the note turns `?` and you get a notification. Answer with `<leader>ar`; the note goes back to Claude with the question and your answer.
+4. If Claude needs more from you, the note turns `?` and you get a notification. Save the file, then answer with `<leader>ar`; the note goes back to Claude with the question and your answer.
 5. You get a notification as replies come in. Rest the cursor on a `✓` line to read the whole reply, or walk through them with `<leader>an`.
 
 | Key | Command | |
