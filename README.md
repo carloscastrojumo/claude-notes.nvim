@@ -6,7 +6,8 @@ Leave review notes on lines of code while you read it in Neovim, and have a Clau
 ✎ note       a line you left a note on
 ⇡ queued     sent, waiting for a Claude session to pick it up
 … working    Claude is on it
-✓ Claude     done, with Claude's one-line reply at the end of the line
+✓ Claude     done, with the first line of Claude's reply at the end of the line
+┃            the rest of a multi-line note's range
 ```
 
 ## How it works
@@ -40,7 +41,7 @@ lazy.nvim:
 1. Start Claude Code in the repository with the mod loaded, and run `/notes watch` in that session. Only a watching session picks up notes, so with several sessions open in one repo you choose which one works on them.
 2. In Neovim, put the cursor on a line (or select a block) and press `<leader>aa`. Write the note in the popup and press `<C-s>`.
 3. Leave as many notes as you like, across files.
-4. Press `<leader>aS` to send them. The status line shows a spinner while Claude works.
+4. Save the files you noted, then press `<leader>aS` to send. Claude reads the files on disk, so sending is refused while a buffer with open notes has unsaved changes. The status line shows a spinner while Claude works.
 5. When a note is done you get a "Claude finished N notes" notification, the sign turns to `✓` and the reply shows at the end of the line. Rest the cursor on the line to read the whole reply, or press `<leader>an` to walk through every reply.
 
 If Claude changed a file you have open, reload it with `:e` (or `:checktime`).
@@ -55,18 +56,20 @@ If Claude changed a file you have open, reload it with `:e` (or `:checktime`).
 | `<leader>an` | `:ClaudeNoteNext` | Jump to the next Claude reply, across files, and pop it up |
 | `<leader>ap` | `:ClaudeNotePrev` | Jump to the previous reply |
 | `<leader>as` | `:ClaudeNoteShow` | Show the note on this line and its reply |
-| `<leader>ae` | `:ClaudeNoteEdit` | Edit the note on this line (before it is sent) |
-| `<leader>ad` | `:ClaudeNoteDelete` | Delete the note on this line |
-| `<leader>al` | `:ClaudeNotes` | All notes of the repository in the quickfix list |
+| `<leader>ae` | `:ClaudeNoteEdit` | Edit the note on this line, while it is still open |
+| `<leader>ad` | `:ClaudeNoteDelete` | Delete the note on this line, unless Claude is working on it |
+| `<leader>al` | `:ClaudeNotes` | All notes of the repository in the quickfix list (the current buffer's repository, else the working directory's) |
 | `<leader>ac` | `:ClaudeNotesClear` | Remove the done notes |
 
-In the note editor: `<C-s>` saves (insert or normal mode), `q` or `<Esc>` cancels.
+In the note editor: `<C-s>` saves (insert or normal mode), `q` or `<Esc>` cancels and asks first if you wrote something.
 
-Saving a buffer moves its open notes to where the code now is, so notes follow your edits.
+Saving a buffer moves its open and queued notes to where the code now is, so notes follow your edits. Notes Claude has taken stay where they were. If you delete every line a note covers, the note stays at its old line and you get a warning, instead of sliding onto the code next to it.
+
+If a note is sent while you are editing it, saving the edit leaves the note alone and puts your text in the `"` register.
 
 ## Status line
 
-`require("claude-notes").status()` returns a spinner and counts while notes are queued or with Claude (`⠹ Claude: 2 in progress · 1 queued`), and an empty string otherwise. For lualine:
+`require("claude-notes").status()` returns a spinner and counts while notes are queued or with Claude (`⠹ Claude: 2 in progress · 1 queued`), and an empty string otherwise. If the notes file has not changed for `stale_after` seconds while notes are pending (no Claude session watching, or it stopped), the spinner stops and the text says so (`Claude: 1 queued · no update for 12m`). For lualine:
 
 ```lua
 lualine_x = {
@@ -86,11 +89,19 @@ Defaults:
 require("claude-notes").setup({
   keymaps = true,          -- set the keys above
   prefix = "<leader>a",    -- prefix for every key
-  max_snippet_lines = 80,  -- lines of code sent with a note
+  max_snippet_lines = 80,  -- lines of code stored with a note
+  -- Lua patterns on the lowercased repo-relative path; matching files get no snippet copied
+  snippet_exclude = { "%.env$", "%.env%.", "%.pem$", "%.key$", "id_rsa", "id_ed25519", "secrets?%." },
   hover = true,            -- pop up a done note's reply when the cursor rests on it
   hover_delay = 500,       -- ms before the popup
+  max_label = 120,         -- characters of note or reply shown at the end of the line
+  max_range_signs = 200,   -- range signs drawn for a long note
+  stale_after = 600,       -- seconds without a change before pending notes count as stuck
+  git_timeout = 2000,      -- ms for the git call that finds a buffer's repository
 })
 ```
+
+`snippet_exclude` replaces the default list when given. Claude still reads the file itself when it works on the note; the exclusion only keeps a copy of those lines out of the notes file.
 
 ## Colors
 
@@ -126,6 +137,8 @@ Signs use `DiagnosticWarn`, `DiagnosticHint`, `DiagnosticInfo` and `DiagnosticOk
 ```
 
 `status` is `open`, `queued`, `sent` or `done`. The plugin sets `open` and `queued`; the mod sets `sent`, `done`, `reply` and `claimedBy`.
+
+Both sides rewrite the whole file. The plugin keeps fields it doesn't know about, re-checks the file just before replacing it and redoes its change on the fresh copy if the mod wrote in between. A note with a missing or wrong-typed field, an unknown status, or a `file` that is absolute or contains `..` is skipped with a warning and left in the file untouched. A jump never opens a file that resolves outside the repository.
 
 ## Tests
 
