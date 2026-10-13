@@ -2,6 +2,8 @@
 
 # claude-notes.nvim
 
+[![CI](https://github.com/carloscastrojumo/claude-notes.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/carloscastrojumo/claude-notes.nvim/actions/workflows/ci.yml)
+
 Leave notes on code as you read it in Neovim, then hand them to Claude Code in one go. Mark a line or a block, say what you want changed, send. Claude's reply shows up next to the code, so you stop pasting snippets into prompts.
 
 ```
@@ -25,8 +27,10 @@ Needs Neovim 0.11+, git, and Claude Code with the nvim-notes mod:
 Then the plugin itself:
 
 ```lua
-{ "carloscastrojumo/claude-notes.nvim", lazy = false, opts = {} }
+{ "carloscastrojumo/claude-notes.nvim", version = "*", lazy = false, opts = {} }
 ```
+
+`version = "*"` keeps you on the latest [release](https://github.com/carloscastrojumo/claude-notes.nvim/releases). Leave it out to track `main`.
 
 ## Use
 
@@ -81,6 +85,10 @@ require("claude-notes").setup({
 ## Known limitations
 
 Nothing locks the notes file, so a mod write that lands at the exact moment of a Neovim write can be lost. A save can wait up to ~200 ms while the mod is mid-write. A repository created inside a directory Neovim already knows isn't noticed until you `:cd`. One Neovim per repository is assumed.
+
+## Releases
+
+Push a `vX.Y.Z` tag. The release workflow runs the tests on Linux and macOS against Neovim stable and nightly, then publishes a GitHub release with generated notes.
 
 ## Tests
 
