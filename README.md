@@ -12,14 +12,14 @@ Leave notes on code as you read it in Neovim, then hand them to Claude Code in o
 ✓ Claude     done; the first line of the reply sits at the end of the line
 ```
 
-Notes are stored in `.git/claude-notes.json`, so they never get committed. The other half is the [nvim-notes](https://github.com/carloscastrojumo/claude-notes-mod) Claude Code mod: a session running it picks up your notes, works through them, and writes each reply back. Notes and the code they point at go to the model, so keep secrets and customer data out of them.
+Notes are stored in `.git/claude-notes.json`, so they never get committed. The other half is the [nvim-notes](https://github.com/carloscastrojumo/nvim-notes) Claude Code mod: a session running it picks up your notes, works through them, and writes each reply back. Notes and the code they point at go to the model, so keep secrets and customer data out of them.
 
 ## Install
 
 Needs Neovim 0.11+, git, and Claude Code with the nvim-notes mod:
 
 ```
-/plugin install nvim-notes --marketplace carloscastrojumo/claude-notes-mod
+/plugin install nvim-notes --marketplace carloscastrojumo/nvim-notes
 ```
 
 Then the plugin itself:
