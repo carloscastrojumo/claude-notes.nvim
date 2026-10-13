@@ -836,6 +836,11 @@ local function editor(title, initial, on_submit, on_cancel)
   end
 end
 
+local function keep_text(text, why)
+  vim.fn.setreg('"', text)
+  notify(why .. '; your text is in the " register', vim.log.levels.WARN)
+end
+
 local function has_open_note(repo, rel)
   for _, note in ipairs(repo.notes) do
     if note.file == rel and note.status == "open" then
@@ -871,7 +876,7 @@ function M.add(line1, line2, text)
     if not is_excluded(rel) then
       snippet = table.concat(vim.list_slice(vim.api.nvim_buf_get_lines(buf, first - 1, last, false), 1, config.max_snippet_lines), "\n")
     end
-    update_notes(repo, function(notes)
+    local saved = update_notes(repo, function(notes)
       table.insert(notes, {
         id = new_id(notes),
         file = rel,
@@ -883,6 +888,9 @@ function M.add(line1, line2, text)
         createdAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
       })
     end)
+    if not saved then
+      keep_text(note_text, "the note was not saved")
+    end
   end
   if text and text ~= "" then
     save(text, line1, line2)
@@ -900,8 +908,7 @@ function M.add(line1, line2, text)
     local pos = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_extmark_by_id(buf, anchor_ns, anchor, { details = true }) or {}
     drop_anchor()
     if not pos[1] or pos[3].invalid then
-      vim.fn.setreg('"', note_text)
-      notify('the lines for this note are gone; your text is in the " register', vim.log.levels.WARN)
+      keep_text(note_text, "the lines for this note are gone")
       return
     end
     save(note_text, pos[1] + 1, (pos[3].end_row or pos[1]) + 1)
@@ -925,9 +932,8 @@ function M.edit()
       end
       current.text = text
     end)
-    if not saved and why == "rejected" then
-      vim.fn.setreg('"', text)
-      notify('the note was sent or removed while you edited it; your text is in the " register', vim.log.levels.WARN)
+    if not saved then
+      keep_text(text, why == "rejected" and "the note was sent or removed while you edited it" or "the edit was not saved")
     end
   end)
 end
@@ -1046,7 +1052,8 @@ end
 
 local function sync_positions(buf)
   local repo = cached_repo(buf)
-  if not repo or not state.marks[buf] then
+  -- Still modified after a write means it went elsewhere (:w other.txt); the file's lines did not change.
+  if not repo or not state.marks[buf] or vim.bo[buf].modified then
     return
   end
   local orphans = state.orphans[buf] or {}
@@ -1063,8 +1070,7 @@ local function sync_positions(buf)
   local moves = {}
   for _, note in ipairs(repo.notes) do
     local to = positions[note.id]
-    local is_waiting = note.status == "open" or note.status == "queued"
-    if orphans[note.id] and is_waiting and not state.orphan_warned[note.id] then
+    if orphans[note.id] and not state.orphan_warned[note.id] then
       state.orphan_warned[note.id] = true
       notify(string.format("the code under note %s was deleted; the note stays at %s:%d", note.id, note.file, note.start), vim.log.levels.WARN)
     elseif to and (to.start ~= note.start or to["end"] ~= note["end"]) then

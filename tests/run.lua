@@ -413,7 +413,8 @@ case("a failed write leaves the notes file as it was", function()
   vim.uv.fs_write = real_write
   local _, after = read_notes()
   check(ok and after == before, "the original file is untouched")
-  check(notified[#notified]:find("ENOSPC", 1, true) ~= nil, "the error is reported: " .. notified[#notified])
+  check(table.concat(notified, "\n"):find("ENOSPC", 1, true) ~= nil, "the error is reported")
+  check(vim.fn.getreg('"') == "lost", "and the note's text is kept in the unnamed register")
   local leftovers = vim.fn.glob(R .. "/.git/claude-notes.json.*.tmp", false, true)
   check(#leftovers == 0, "no temp file is left behind")
   notes.add(4, 4, "kept")
@@ -626,6 +627,39 @@ case("the quickfix list is capped", function()
   notes.list()
   check(#vim.fn.getqflist() == 4, "only max_notes notes are listed")
   vim.cmd("cclose")
+end)
+
+case("text typed in the editor survives a failed save", function()
+  open_app()
+  notes.add(4, 4)
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "keep me" })
+  local real_write = vim.uv.fs_write
+  vim.uv.fs_write = function()
+    return nil, "ENOSPC: no space left on device"
+  end
+  vim.fn.maparg("<C-s>", "i", false, true).callback()
+  vim.uv.fs_write = real_write
+  check(vim.fn.getreg('"') == "keep me", "the text is in the unnamed register")
+  check(notified[#notified]:find('the note was not saved; your text is in the " register', 1, true) ~= nil, "and the person is told: " .. notified[#notified])
+end)
+
+case("writing a buffer to another file does not move notes", function()
+  write_notes({ version = 1, root = R, notes = { note("a1", { start = 4, ["end"] = 4 }) } })
+  open_app()
+  vim.api.nvim_buf_set_lines(0, 0, 0, false, { "// one", "// two" })
+  vim.cmd("silent write " .. vim.fn.fnameescape(R .. "/copy.go"))
+  check(read_notes().notes[1].start == 4, "the note keeps the line it has in the real file")
+  vim.cmd("silent write")
+  check(read_notes().notes[1].start == 6, "and moves once the buffer is written to its own file")
+end)
+
+case("deleting the lines of a done note warns too", function()
+  write_notes({ version = 1, root = R, notes = { note("d1", { status = "done", reply = "ok", start = 4, ["end"] = 4 }) } })
+  open_app()
+  vim.api.nvim_buf_set_lines(0, 3, 4, false, {})
+  vim.cmd("silent write")
+  check(read_notes().notes[1].start == 4, "the done note stays at its old line")
+  check(notified[#notified]:find("was deleted", 1, true) ~= nil, "and the person is told: " .. tostring(notified[#notified]))
 end)
 
 if failures == 0 then

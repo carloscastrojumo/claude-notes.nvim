@@ -63,9 +63,9 @@ If Claude changed a file you have open, reload it with `:e` (or `:checktime`).
 
 In the note editor: `<C-s>` saves (insert or normal mode), `q` or `<Esc>` cancels and asks first if you wrote something.
 
-Notes follow your edits: while a buffer has unsaved changes its signs stay on the code they were placed on, and saving records the new lines for every note. A new note's range is taken when you save it in the editor, so edits made while the editor is open don't throw it off. Notes Claude has taken stay where they were. If you delete every line a note covers, the note stays at its old line and you get a warning, instead of sliding onto the code next to it.
+Notes follow your edits: while a buffer has unsaved changes its signs stay on the code they were placed on, and saving the buffer to its own file records the new lines for every note. A new note's range is taken when you save it in the editor, so edits made while the editor is open don't throw it off. If you delete every line a note covers, the note stays at its old line and you get a warning, instead of sliding onto the code next to it.
 
-If a note is sent while you are editing it, saving the edit leaves the note alone and puts your text in the `"` register.
+Whenever a note or an edit can't be saved (the note was sent while you edited it, its lines were deleted, or the notes file couldn't be written), your text goes to the `"` register and you get a warning.
 
 ## Status line
 
