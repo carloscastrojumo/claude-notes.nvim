@@ -685,11 +685,21 @@ local function capped(text)
   return vim.fn.strcharpart(text, 0, MAX_POPUP_CHARS) .. "\n\n… (cut; the rest is in the notes file)"
 end
 
+-- A done note's reply joins the thread when the conversation goes on, so Claude sees what it said.
+local function full_thread(note)
+  local thread = vim.deepcopy(note.thread or {})
+  local last = thread[#thread]
+  if note.status == "done" and note.reply and not (last and last.from == "claude" and last.text == note.reply) then
+    table.insert(thread, { from = "claude", text = note.reply })
+  end
+  return thread
+end
+
 local function conversation(note)
   local lines = { "*Your note:*" }
   vim.list_extend(lines, vim.split(capped(note.text), "\n"))
   for _, entry in ipairs(note.thread or {}) do
-    vim.list_extend(lines, { "", entry.from == "claude" and "**Claude asked:**" or "*You answered:*" })
+    vim.list_extend(lines, { "", entry.from == "claude" and "**Claude:**" or "*You:*" })
     vim.list_extend(lines, vim.split(capped(entry.text), "\n"))
   end
   return lines
@@ -1039,9 +1049,12 @@ function M.reply()
   if not note then
     return
   end
-  local question = note.status == "question" and last_question(note)
-  if not question then
-    notify("Claude has no open question on this note", vim.log.levels.WARN)
+  if note.status == "open" then
+    notify(string.format("this note hasn't been sent yet; edit it with %se", config.prefix), vim.log.levels.WARN)
+    return
+  end
+  if note.status == "queued" or note.status == "sent" then
+    notify("Claude has this note already; reply once it answers", vim.log.levels.WARN)
     return
   end
   for _, buf in ipairs(repo_buffers(repo)) do
@@ -1050,22 +1063,26 @@ function M.reply()
       return
     end
   end
-  editor("Your answer", "", function(text)
+  local is_question = note.status == "question"
+  local shown = vim.tbl_extend("force", note, { thread = full_thread(note) })
+  local where = note.file .. ":" .. range_label(note)
+  editor(is_question and "Your answer" or "Your follow-up", "", function(text)
     local saved, why = update_notes(repo, function(notes)
       local current = find_by_id(notes, note.id)
-      if not current or current.status ~= "question" then
+      if not current or current.status ~= note.status then
         return "reject"
       end
-      current.thread = current.thread or {}
+      current.thread = full_thread(current)
       table.insert(current.thread, { from = "you", text = text })
       current.status = "queued"
+      current.reply, current.resolvedAt = nil, nil
     end)
     if saved then
-      notify("Answer queued for Claude")
+      notify("Reply queued for Claude")
     else
-      keep_text(text, why == "rejected" and "the question was answered or removed meanwhile" or "the answer was not saved")
+      keep_text(text, why == "rejected" and "the note changed while you were writing" or "the reply was not saved")
     end
-  end, nil, { context = conversation(note), context_title = "Claude asks · " .. note.file .. ":" .. range_label(note) })
+  end, nil, { context = conversation(shown), context_title = (is_question and "Claude asks · " or "Follow up · ") .. where })
 end
 
 function M.delete()
@@ -1270,7 +1287,7 @@ local function actions()
     { name = "ClaudeNotePrev", key = "p", desc = "previous reply", run = M.prev_reply },
     { name = "ClaudeNoteShow", key = "s", desc = "show the note on this line", run = M.show },
     { name = "ClaudeNoteEdit", key = "e", desc = "edit the note on this line", run = M.edit },
-    { name = "ClaudeNoteReply", key = "r", desc = "answer Claude's question on this line", run = M.reply },
+    { name = "ClaudeNoteReply", key = "r", desc = "reply to Claude on this line", run = M.reply },
     { name = "ClaudeNoteDelete", key = "d", desc = "delete the note on this line", run = M.delete },
     { name = "ClaudeNotes", key = "l", desc = "list notes in quickfix", run = M.list },
     { name = "ClaudeNotesClear", key = "c", desc = "clear done notes", run = M.clear },

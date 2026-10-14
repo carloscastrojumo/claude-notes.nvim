@@ -38,13 +38,13 @@ Then the plugin itself:
 2. In Neovim, press `<leader>aa` on a line or a visual selection, write the note, `<C-s>` to save.
 3. Save your files and press `<leader>aS` to send. Unsaved buffers with notes block the send, because Claude reads the files on disk.
 4. If Claude needs more from you, the note turns `?` and you get a notification. Save the file, then answer with `<leader>ar`: the question stays in a panel above the answer box (`<C-f>`/`<C-b>` scroll it), and the note goes back to Claude with the question and your answer.
-5. You get a notification as replies come in. Rest the cursor on a `✓` line to read the whole reply, or walk through them with `<leader>an`.
+5. You get a notification as replies come in. Rest the cursor on a `✓` line to read the whole reply, or walk through them with `<leader>an`. To follow up, press `<leader>ar` on a done note: Claude gets its earlier reply and what you add.
 
 | Key | Command | |
 | --- | --- | --- |
 | `<leader>aa` | `:[range]ClaudeNote [text]` | Note on the line or selection |
 | `<leader>aS` | `:ClaudeNotesSend` | Send open notes |
-| `<leader>ar` | `:ClaudeNoteReply` | Answer Claude's question on this line |
+| `<leader>ar` | `:ClaudeNoteReply` | Reply to Claude on this line: answer its question or follow up on its reply |
 | `<leader>an` / `<leader>ap` | `:ClaudeNoteNext` / `:ClaudeNotePrev` | Next / previous reply or question |
 | `<leader>as` | `:ClaudeNoteShow` | Show the note and reply on this line |
 | `<leader>ae` | `:ClaudeNoteEdit` | Edit a note that hasn't been sent |

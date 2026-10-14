@@ -682,7 +682,7 @@ case("a question from Claude shows up, and the answer goes back queued", functio
   check(wait_for(function()
     return popup_text() ~= nil
   end), "resting on it pops up the question")
-  check(popup_text():find("**Claude asked:**\nWhich timeout?\nThere are two.", 1, true) ~= nil, "with the whole question: " .. tostring(popup_text()))
+  check(popup_text():find("**Claude:**\nWhich timeout?\nThere are two.", 1, true) ~= nil, "with the whole question: " .. tostring(popup_text()))
   close_popups()
 
   notes.reply()
@@ -691,15 +691,22 @@ case("a question from Claude shows up, and the answer goes back queued", functio
   local answered = read_notes().notes[1]
   check(answered.status == "queued", "answering queues the note again")
   check(#answered.thread == 2 and answered.thread[2].from == "you" and answered.thread[2].text == "the read timeout", "and adds the answer to its thread")
-  check(notified[#notified] == "Answer queued for Claude", "the person is told")
+  check(notified[#notified] == "Reply queued for Claude", "the person is told")
 end)
 
-case("answering is refused when there is no question, or the code is unsaved", function()
-  write_notes({ version = 1, root = R, notes = { note("o1", { start = 4, ["end"] = 4 }), note("q1", { start = 3, ["end"] = 3, status = "question", thread = { { from = "claude", text = "Why?" } } }) } })
+case("replying is refused before Claude answers, or while the code is unsaved", function()
+  write_notes({ version = 1, root = R, notes = {
+    note("o1", { start = 4, ["end"] = 4 }),
+    note("q1", { start = 3, ["end"] = 3, status = "question", thread = { { from = "claude", text = "Why?" } } }),
+    note("s1", { start = 1, ["end"] = 1, status = "sent" }),
+  } })
   open_app()
   vim.api.nvim_win_set_cursor(0, { 4, 0 })
   notes.reply()
-  check(notified[#notified] == "Claude has no open question on this note", "no question, no editor")
+  check(notified[#notified]:find("hasn't been sent yet", 1, true) ~= nil, "an open note is edited, not replied to: " .. notified[#notified])
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  notes.reply()
+  check(notified[#notified]:find("Claude has this note already", 1, true) ~= nil, "a note with Claude waits for its answer: " .. notified[#notified])
   vim.api.nvim_buf_set_lines(0, 0, 0, false, { "// unsaved" })
   vim.api.nvim_win_set_cursor(0, { 4, 0 })
   notes.reply()
@@ -764,7 +771,7 @@ case("the question stays visible above the answer box", function()
   end, floats())[1]
   check(#floats() == 2 and panel ~= nil, "answering opens the question panel and the answer box")
   local panel_text = table.concat(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(panel), 0, -1, false), "\n")
-  check(panel_text:find("*Your note:*\nask me", 1, true) ~= nil and panel_text:find("**Claude asked:**\nline 1 of", 1, true) ~= nil, "the panel shows the note and the whole question")
+  check(panel_text:find("*Your note:*\nask me", 1, true) ~= nil and panel_text:find("**Claude:**\nline 1 of", 1, true) ~= nil, "the panel shows the note and the whole question")
   check(vim.api.nvim_win_get_config(panel).row < vim.api.nvim_win_get_config(editor_win).row, "the panel sits above the answer box")
   check(vim.fn.getwininfo(panel)[1].topline == 1, "the panel starts at the top")
   vim.fn.maparg("<C-f>", "i", false, true).callback()
@@ -778,6 +785,30 @@ case("the question stays visible above the answer box", function()
   vim.fn.maparg("<C-s>", "i", false, true).callback()
   check(#floats() == 0, "saving closes both")
   check(read_notes().notes[1].status == "queued", "and the answer is queued")
+end)
+
+case("a done note can be followed up, and carries Claude's reply into the thread", function()
+  write_notes({ version = 1, root = R, notes = { note("d1", { start = 4, ["end"] = 4, text = "add a timeout", status = "done", reply = "added a 5s timeout", resolvedAt = "x" }) } })
+  open_app()
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  notes.reply()
+  local editor_win = vim.api.nvim_get_current_win()
+  local panel
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if win ~= editor_win and vim.api.nvim_win_get_config(win).relative ~= "" then
+      panel = win
+    end
+  end
+  local panel_text = table.concat(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(panel), 0, -1, false), "\n")
+  check(panel_text:find("**Claude:**\nadded a 5s timeout", 1, true) ~= nil, "the panel shows Claude's reply to follow up on")
+  check(vim.api.nvim_win_get_config(panel).title[1][1]:find("Follow up", 1, true) ~= nil, "and is titled as a follow-up")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "make it configurable" })
+  vim.fn.maparg("<C-s>", "i", false, true).callback()
+  local followed = read_notes().notes[1]
+  check(followed.status == "queued", "the note goes back to Claude")
+  check(#followed.thread == 2 and followed.thread[1].from == "claude" and followed.thread[1].text == "added a 5s timeout", "Claude's reply joins the thread")
+  check(followed.thread[2].from == "you" and followed.thread[2].text == "make it configurable", "followed by the follow-up")
+  check(followed.reply == nil and followed.resolvedAt == nil, "and the old reply is cleared so it isn't shown twice")
 end)
 
 if failures == 0 then
